@@ -23,12 +23,14 @@ The main dependency for the OT solver is [POT](https://pythonot.github.io/) (Pyt
 
 ## Quick start
 
-1. Edit `config.yaml` — set the paths to your simulation files and adjust the branching fractions if needed.
+1. Edit `config.yaml` — set `mode`, the paths to your generator-level $X_u\ell\nu$ files for that B charge, and the output file name, and adjust the branching fractions if needed.
 2. Run the script:
    ```bash
    python3 compute_weights.py --config config.yaml
    ```
-3. This produces `hybrid_weights.csv` — a table of OT hybrid weights indexed by (P+, P-) bin edges. Pass `--plot` to also generate kinematic distribution and moment comparison plots.
+3. This produces `hybrid_weights.csv` — a table of OT hybrid weights indexed by (P+, P-) bin edges. Pass `--plot` to also generate kinematic distribution and moment comparison plots. 
+- The script prints a `WARNING` for config values that fall back to defaults and for inputs that do not match `mode`.
+4. Repeat steps 1–3 with the other `mode`, inputs and output name to get the table for the other B charge.
 
 See `example_notebook.ipynb` for a step-by-step walkthrough.
 
@@ -59,7 +61,7 @@ or open `example_notebook.ipynb`, set `PATH_INCLUSIVE` and `PATH_RESONANT` in th
 
 ## Input format
 
-The script expects two simulation samples — an inclusive HQE sample and a combined resonant sample — in ROOT or parquet format. The following columns must be present (names are configurable in `config.yaml`):
+The script expects two pure generator-level $B\to X_u\ell\nu$ simulation samples (no reconstruction, no selection) of the B charge set by `mode` — an inclusive HQE sample and a combined resonant sample — in ROOT or parquet format. The following columns must be present (names are configurable in `config.yaml`):
 
 | Column | Description |
 |--------|-------------|
@@ -84,7 +86,7 @@ The primary output is `hybrid_weights.csv` — a weight table with one row per (
 | `pminus_high` | Upper edge of the P- bin [GeV] |
 | `ot_hybrid_weight` | Fraction of inclusive events in this bin that remain after resonances are placed |
 
-To apply the weights to your events, find each event's (P+, P-) bin and multiply its existing weight by `ot_hybrid_weight`. Values close to 1 mean the bin is unaffected by resonances; values close to 0 mean it is fully covered. The resonant events keep their own weights unchanged.
+To apply the weights to your reconstructed analysis samples, find each event's generated (P+, P-) bin and multiply its existing weight by `ot_hybrid_weight`. Values close to 1 mean the bin is unaffected by resonances; values close to 0 mean it is fully covered. The resonant events keep their own weights unchanged.
 
 ## Config reference
 
@@ -93,6 +95,7 @@ Key parameters in `config.yaml`:
 | Parameter | Description |
 |-----------|-------------|
 | `mode` | `charged` (B+) or `neutral` (B0) |
+| `input.signal_filter_col` | Optional: keep only events with this column `> 0`. Leave empty for pure signal samples. |
 | `optimal_transport.bin_width` | Grid spacing in (P+, P-) [GeV]. 0.08 GeV is the default. |
 | `optimal_transport.window` | Spatial window limiting transport connections. `null` = no restriction. |
 | `optimal_transport.lambda_reg` | Entropy regularization (0 = exact EMD, recommended). |

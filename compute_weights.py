@@ -15,16 +15,18 @@ The primary output is a CSV weight table with one row per (P+, P-) bin:
 To apply the weights to your events, look up each event's (P+, P-) bin and
 multiply its existing weight by the corresponding ot_hybrid_weight value.
 
-Pass --plot to also produce kinematic distribution and moment comparison plots.
+Pass --plot to also produce kinematic distribution, moment comparison, and weight distribution plots.
 """
 
 import argparse
 import os
-
+import sys
 import numpy as np
 import pandas as pd
 import uproot
 import yaml
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 from hybrid import (
     build_phase_space_grid,
@@ -61,6 +63,61 @@ def load_dataframe(path, columns=None):
 def load_config(path):
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def cfg_get(section, key, default, where):
+    """config value, or `default` with a WARNING if the key is missing/empty in the config."""
+    value = (section or {}).get(key)
+    if value is None:
+        print(f"WARNING: '{where}{key}' not set in the config, using the default: {default!r}")
+        return default
+    return value
+
+
+def available_columns(path):
+    """Column names of a parquet file or of the first tree of a ROOT file."""
+    if path.endswith(".parquet") or path.endswith(".pq"):
+        import pyarrow.parquet as pq
+        return pq.ParquetFile(path).schema_arrow.names
+    with uproot.open(path) as f:
+        tree_name = next(k.split(";")[0] for k in f.keys() if not k.startswith("/"))
+        return list(f[tree_name].keys())
+
+
+# file-name hints for the other B charge, to catch a mode/input mismatch
+OTHER_MODE_HINTS = {"charged": ("B0", "Bzero", "neutral"), "neutral": ("Bplus", "Bpm", "Bp_", "charged")}
+
+
+def check_inputs(df_incl, df_excl, mode, bfs, pdg_col, pplus_col, pminus_col, ot_cfg):
+    """Warnings for the most common setup mistakes (wrong mode, reconstructed instead of generator-level input)."""
+    # resonant modes in the file vs. the branching fractions of the selected mode
+    found = df_excl[pdg_col].abs().value_counts()
+    expected = set(bfs)
+    missing = sorted(expected - set(found.index.astype(int)))
+    unexpected = {int(k): int(v) for k, v in found.items() if int(k) not in expected}
+    print(f"Resonant sample, |{pdg_col}| counts: {({int(k): int(v) for k, v in found.items()})}")
+    if missing:
+        print(f"WARNING: no resonant events for PDG {missing}, which have a branching fraction for mode "
+              f"'{mode}'. Is the resonant file for the right B charge (mode)?")
+    if unexpected:
+        frac = sum(unexpected.values()) / len(df_excl)
+        print(f"WARNING: {frac:.1%} of the resonant events have PDG codes without a branching fraction for "
+              f"mode '{mode}': {unexpected}. They still enter the resonant (target) distribution. "
+              f"Wrong mode, or the resonant file contains the other B charge / non-signal events?")
+    print(f"Inclusive sample, |{pdg_col}| values: {sorted(int(v) for v in df_incl[pdg_col].abs().dropna().unique())}")
+
+    # P+/P- outside the grid or missing: should not happen for pure generator-level decays
+    for name, df in (("inclusive", df_incl), ("resonant", df_excl)):
+        pp, pm = df[pplus_col], df[pminus_col]
+        n_nan = int((pp.isna() | pm.isna()).sum())
+        n_out = int(((pp < ot_cfg["pplus_range"][0]) | (pp >= ot_cfg["pplus_range"][1]) |
+                     (pm < ot_cfg["pminus_range"][0]) | (pm >= ot_cfg["pminus_range"][1])).sum())
+        if n_nan:
+            print(f"WARNING: {n_nan} {name} events ({n_nan/len(df):.2%}) have no {pplus_col}/{pminus_col}. "
+                  f"The inputs should be pure generator-level B -> Xu l nu decays (no reconstruction).")
+        if n_out:
+            print(f"WARNING: {n_out} {name} events ({n_out/len(df):.2%}) are outside pplus_range/pminus_range "
+                  f"and do not enter the OT grid.")
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +178,6 @@ def _set_axis_spacing(axes_main, axes_ratio, ncols):
 def plot_distributions(df_incl, df_excl, mode, incl_model, plots_dir):
     """Stack plot of kinematic variables with hybrid / DFN ratio panel."""
     from plothist import get_color_palette
-    import matplotlib.pyplot as plt
-
-    os.makedirs(plots_dir, exist_ok=True)
 
     variables = [
         ("genMx",        np.linspace(0, 3.50, 36), r"$M_X$ [GeV]"),
@@ -205,6 +259,7 @@ def plot_distributions(df_incl, df_excl, mode, incl_model, plots_dir):
     plt.savefig(os.path.join(plots_dir, f"distributions_{mode}.pdf"),
                 bbox_inches="tight", facecolor="white")
     plt.show()
+    plt.close()
 
 
 # ---------------------------------------------------------------------------
@@ -223,19 +278,39 @@ def main():
     cfg = load_config(args.config)
 
     mode        = cfg["mode"]
-    incl_model  = cfg.get("inclusive_model", "inclusive")
+    if mode not in ("charged", "neutral"):
+        sys.exit(f"mode must be 'charged' or 'neutral', not {mode!r}")
+    print(f"Mode: {mode} ({'B+ -> Xu0 l nu' if mode == 'charged' else 'B0 -> Xu- l nu'})")
+    incl_model  = cfg_get(cfg, "inclusive_model", "inclusive", "")
     in_cfg      = cfg["input"]
     ot_cfg      = cfg["optimal_transport"]
     conv_cfg    = cfg["conventional_hybrid"]
     out_cfg     = cfg["output"]
 
     bfs         = {int(k): v for k, v in cfg["branching_fractions"][mode].items()}
-    incl_bf     = cfg["inclusive_branching_fraction"]
+    incl_bf_cfg = cfg["inclusive_branching_fraction"]
+    incl_bf = incl_bf_cfg[mode]
+    print(f"Branching fractions ({mode}): exclusive {bfs}, inclusive {incl_bf}")
 
-    pplus_col  = in_cfg.get("pplus_col",  "genPplus")
-    pminus_col = in_cfg.get("pminus_col", "genPminus")
-    pdg_col    = in_cfg.get("pdg_col",    "X_gen_PDG")
-    input_weight_col = in_cfg.get("input_weight_col", "input_weight")
+    pplus_col  = cfg_get(in_cfg, "pplus_col",  "genPplus",  "input.")
+    pminus_col = cfg_get(in_cfg, "pminus_col", "genPminus", "input.")
+    pdg_col    = cfg_get(in_cfg, "pdg_col",    "X_gen_PDG", "input.")
+    input_weight_col = cfg_get(in_cfg, "input_weight_col", "input_weight", "input.")
+    weights_file = cfg_get(out_cfg, "weights_file", "hybrid_weights.csv", "output.")
+    plots_dir    = cfg_get(out_cfg, "plots_dir", "plots/", "output.") if args.plot else None
+    if "window" not in ot_cfg:
+        print("WARNING: 'optimal_transport.window' not set in the config, using the default: None (all connections)")
+    if "lambda_reg" not in ot_cfg:
+        print("WARNING: 'optimal_transport.lambda_reg' not set in the config, using the default: 0 (exact EMD)")
+
+    for label, path in (("input.inclusive", in_cfg["inclusive"]), ("input.resonant", in_cfg["resonant"]),
+                        ("output.weights_file", weights_file)):
+        name = os.path.basename(path)
+        if any(hint in name for hint in OTHER_MODE_HINTS[mode]):
+            print(f"WARNING: {label} = {name} looks like a file for the other B charge, but mode = '{mode}'")
+
+    os.makedirs(str(Path(weights_file).parent), exist_ok=True)
+    if args.plot: os.makedirs(plots_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Load data — only the columns actually needed
@@ -251,17 +326,35 @@ def main():
         *(["genCosThetaL"] if args.plot else []),
     ])))
 
+    def _cols(path):  # the input weight column is optional: only request it if the file has it
+        return needed_cols + ([input_weight_col] if input_weight_col in available_columns(path) else [])
+
     print("Loading inclusive sample ...")
-    df_incl = load_dataframe(in_cfg["inclusive"], columns=needed_cols)
+    df_incl = load_dataframe(in_cfg["inclusive"], columns=_cols(in_cfg["inclusive"]))
 
     print("Loading resonant sample ...")
-    df_excl = load_dataframe(in_cfg["resonant"], columns=needed_cols)
+    df_excl = load_dataframe(in_cfg["resonant"], columns=_cols(in_cfg["resonant"]))
 
     if signal_col:
-        df_incl = df_incl[df_incl[signal_col] > 0].reset_index(drop=True)
-        df_excl = df_excl[df_excl[signal_col] > 0].reset_index(drop=True)
-        print(f"After signal filter ({signal_col} > 0): "
-              f"{len(df_incl):,} inclusive, {len(df_excl):,} resonant")
+        print(f"Signal filter: keeping only events with {signal_col} > 0")
+        for name in ("inclusive", "resonant"):
+            df = df_incl if name == "inclusive" else df_excl
+            values = sorted(df[signal_col].dropna().unique().tolist())
+            if (df[signal_col] < 0).any():
+                print(f"WARNING: {signal_col} has negative values in the {name} sample ({values[:10]}). "
+                      f"'> 0' removes them: for a PDG code this keeps only B+/B0 and drops the charge-conjugate "
+                      f"B-/B0bar decays (the sample is halved, the shapes do not change). "
+                      f"Leave signal_filter_col empty to keep both.")
+            kept = df[df[signal_col] > 0].reset_index(drop=True)
+            print(f"  {name}: kept {len(kept):,} of {len(df):,} events ({len(kept)/len(df):.1%})")
+            if name == "inclusive":
+                df_incl = kept
+            else:
+                df_excl = kept
+    else:
+        print("No signal filter (signal_filter_col empty): all events are used")
+
+    check_inputs(df_incl, df_excl, mode, bfs, pdg_col, pplus_col, pminus_col, ot_cfg)
 
     # ------------------------------------------------------------------
     # Normalization
@@ -288,6 +381,23 @@ def main():
         pminus_col   = pminus_col,
     )
 
+    if args.plot:
+        cmap = plt.colormaps["RdPu"].copy()
+        cmap.set_bad("white")
+        cmap.set_under("white")
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        for ax, dist, title in zip(axes, [Pinc, Pres], ["Inclusive", "Resonant"]):
+            im = ax.imshow(dist, origin="lower", aspect="auto", cmap=cmap,
+                        extent=[ot_cfg["pminus_range"][0], ot_cfg["pminus_range"][1], ot_cfg["pplus_range"][0], ot_cfg["pplus_range"][1]])
+            ax.set_title(title, fontsize=14)
+            ax.set_xlabel(r"$P^-$ [GeV]")
+            ax.set_ylabel(r"$P^+$ [GeV]")
+            plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, f"weights_{mode}.pdf"))
+        plt.close()
+
+
     print("Solving optimal transport problem ...")
     G, src_coords, src_shape = solve_ot(
         Pinc, Pres,
@@ -302,6 +412,23 @@ def main():
         df_incl, reweight_map, ot_cfg["bin_width"],
         pplus_col=pplus_col, pminus_col=pminus_col,
     )
+
+    if args.plot:
+        cmap = plt.colormaps["RdPu"].copy()
+        cmap.set_bad("white")
+        cmap.set_under("white")
+        fig, ax = plt.subplots(figsize=(7, 5))
+        im = ax.imshow(reweight_map, origin="lower", aspect="auto", cmap=cmap,
+                    extent=[ot_cfg["pminus_range"][0], ot_cfg["pminus_range"][1], ot_cfg["pplus_range"][0], ot_cfg["pplus_range"][1]],
+                    vmin=0, vmax=1)
+        plt.colorbar(im, ax=ax, label="Weight")
+        ax.set_xlabel(r"$P^-$ [GeV]")
+        ax.set_ylabel(r"$P^+$ [GeV]")
+        ax.set_title("OT hybrid reweights")
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, f"hybrid_weights_{mode}.pdf"))
+        plt.close()
+
 
     # ------------------------------------------------------------------
     # Conventional hybrid
@@ -335,7 +462,7 @@ def main():
                 })
 
     weight_table = pd.DataFrame(rows)
-    out_path = out_cfg["weights_file"]
+    out_path = weights_file
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     weight_table.to_csv(out_path, index=False)
     print(f"Saved {len(weight_table)} bin weights to {out_path}")
@@ -344,8 +471,6 @@ def main():
     # Optional plots
     # ------------------------------------------------------------------
     if args.plot:
-        plots_dir = out_cfg.get("plots_dir", "plots/")
-        os.makedirs(plots_dir, exist_ok=True)
 
         print("Producing distribution plots ...")
         plot_distributions(df_incl, df_excl, mode, incl_model, plots_dir)

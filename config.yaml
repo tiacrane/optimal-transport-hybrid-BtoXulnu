@@ -3,14 +3,18 @@
 #   python compute_weights.py --config config.yaml [--plot]
 
 # "charged" for B+ → Xᵤ⁰ ℓ⁺ νₗ, "neutral" for B⁰ → Xᵤ⁻ ℓ⁺ νₗ
-mode: charged
+# One B charge per run. When switching mode, also switch the input files (both!) and the
+# output name below; the branching fractions are picked automatically from 'mode'.
+mode: neutral
 
 # Label used in plots for the inclusive model
 inclusive_model: DFN
 
 input:
-  inclusive: /path/to/inclusive.root   # also accepts .parquet
-  resonant:  /path/to/resonant.root
+  # Pure generator-level B → Xᵤ ℓ⁺ νₗ decays of the B charge set in 'mode' (no reconstruction, no selection).
+  # The weights are derived once from these and then applied to the reconstructed analysis samples.
+  inclusive: /data/dust/user/tiacrane/b2rhonunu_ita/code/b2hnn_helpers/hybrid_weights/B0ToXuenu_central.pq   # also accepts .parquet
+  resonant:  /data/dust/user/tiacrane/b2rhonunu_ita/code/b2hnn_helpers/hybrid_weights/B0ToExclenu.pq
 
   # Column names — adjust if your files use different names
   pplus_col:        genPplus
@@ -18,13 +22,12 @@ input:
   pdg_col:          X_gen_PDG
   input_weight_col: input_weight   # optional per-event weight (e.g. form-factor corrections); omit if not applicable
 
-  # If your files contain background events, set this to the column whose value
-  # must be > 0 to select signal. Leave unset (or null) if no filter is needed.
-  signal_filter_col: Bsig_gen_PDG
+  # Optional: keep only events with <column> > 0. Leave empty for pure generator-level signal samples.
+  signal_filter_col: 
 
 # Branching fractions used for the hybrid normalization.
-# Values are absolute (not ×10^-4). PDG codes are integers.
-# Only the mode selected above is used.
+# Only ratios enter, so any unit works as long as the exclusive and inclusive values use the same one
+# (the values below are in %). PDG codes are integers. Only the mode selected above is used.
 branching_fractions:
   charged:                   # B+ → Xᵤ⁰ ℓ⁺ νₗ exclusive modes
     111: 7.8e-3              # π⁰
@@ -36,9 +39,11 @@ branching_fractions:
     211: 15.0e-3             # π±
     213: 29.4e-3             # ρ±
 
-# Inclusive B(B → Xᵤ ℓ ν) branching fraction (full phase space).
-# Must be in the same unit system as the values above.
-inclusive_branching_fraction: 0.1724
+# Inclusive B(B → Xᵤ ℓ ν) branching fraction (full phase space), same unit as above.
+# One value per mode (charged/neutral), or a single number used for both (a warning is printed).
+inclusive_branching_fraction:
+  charged: 0.192
+  neutral: 0.176
 
 optimal_transport:
   bin_width: 0.08            # GeV — grid spacing in (P+, P-) space
@@ -64,5 +69,5 @@ conventional_hybrid:
     genMx:       [0, 1.4, 1.6, 1.8, 2, 2.5, 3, 3.5]
 
 output:
-  weights_file: hybrid_weights_BplusDFN.csv
-  plots_dir: plots/
+  weights_file: hybrid_weights_B0DFN.csv
+  plots_dir: plots_B0/

@@ -30,6 +30,22 @@ def build_phase_space_grid(df_incl, df_excl, bin_width, pminus_range, pplus_rang
     return Pinc, Pres
 
 
+def _warn_dropped_bins(Psource, Ptarget, min_content):
+    """Warn about (P+, P-) bins left out of the transport problem (0 < content < min_content)."""
+    for name, P in (("inclusive", Psource), ("resonant", Ptarget)):
+        thin = (P > 0) & (P < min_content)
+        if thin.any():
+            print(f"WARNING: {int(thin.sum())} {name} bins below min_content = {min_content} "
+                  f"({P[thin].sum() / P.sum():.2%} of the {name} mass) are left out of the OT")
+    filled = Psource > 0
+    between = np.zeros_like(filled)
+    between[1:-1, :] |= filled[:-2, :] & filled[2:, :]
+    between[:, 1:-1] |= filled[:, :-2] & filled[:, 2:]
+    n_holes = int((~filled & between).sum())
+    if n_holes:
+        print(f"NOTE: {n_holes} empty inclusive bins inside the phase space get weight 0 (matters only when applied to other samples)")
+
+
 def solve_ot(Psource, Ptarget, bin_width, window=None, lambda_reg=0, verbose=False):
     """
     Solve the optimal transport problem between a source and target distribution
@@ -66,6 +82,7 @@ def solve_ot(Psource, Ptarget, bin_width, window=None, lambda_reg=0, verbose=Fal
         raise ValueError("Psource and Ptarget must have the same shape")
 
     min_content = 1
+    _warn_dropped_bins(Psource, Ptarget, min_content)
 
     src_coords, src_weights = [], []
     tgt_coords, tgt_weights = [], []
