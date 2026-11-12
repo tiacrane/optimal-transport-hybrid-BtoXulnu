@@ -88,6 +88,8 @@ The primary output is `hybrid_weights.csv` — a weight table with one row per (
 
 To apply the weights to your reconstructed analysis samples, find each event's generated (P+, P-) bin and multiply its existing weight by `ot_hybrid_weight`. Values close to 1 mean the bin is unaffected by resonances; values close to 0 mean it is fully covered. The resonant events keep their own weights unchanged.
 
+A table is only valid for the samples and event weights it was derived with. For other model parameters or a reweighted Xᵤℓν simulation, derive your own table (regenerated samples, form-factor weights as input_weight, branching fractions in the config). For systematics, vary one source at a time (inclusive model parameters, resonant form-factor eigenvariations, branching fractions) and add the shifts in quadrature.
+
 ## Config reference
 
 Key parameters in `config.yaml`:
